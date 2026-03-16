@@ -1,0 +1,17 @@
+{
+    "daily_limit_mb": 1024,
+    "vpn_limit_mb": 5120,
+    "alert_threshold_percent": 80,
+    "warn_threshold_percent": 95,
+    "speed_alert_upload_kbps": 1024.0,
+    "speed_alert_download_kbps": 2048.0,
+    "refresh_interval_ms": 1000,
+    "network_interface": "auto",
+    "window": {
+        "position_x": 20,
+        "position_y": 20,
+        "opacity": 200,
+        "width": 260,
+        "height": 160
+    }
+}
