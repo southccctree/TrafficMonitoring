@@ -1,0 +1,32 @@
+NetGuard/
+│
+├── CMakeLists.txt              # 构建配置
+├── README.md                   # 项目说明文档
+│
+├── src/
+│   ├── main.cpp                # 程序入口，初始化 & 主循环
+│   │
+│   ├── monitor/
+│   │   ├── NetworkMonitor.h/.cpp   # 核心：读取网卡流量数据
+│   │   └── SpeedCalculator.h/.cpp  # 计算实时上传/下载速度
+│   │
+│   ├── stats/
+│   │   ├── DailyTracker.h/.cpp     # 以天为周期累计流量 & 持久化
+│   │   └── SessionTracker.h/.cpp   # 当次运行的会话流量统计
+│   │
+│   ├── alert/
+│   │   ├── AlertManager.h/.cpp     # 警报规则管理 & 触发逻辑
+│   │   └── Notifier.h/.cpp         # 发出警报（系统通知 / 控制台）
+│   │
+│   ├── config/
+│   │   └── Config.h/.cpp           # 读写配置文件（流量限额、阈值等）
+│   │
+│   └── ui/
+│       ├── OverlayWindow.h/.cpp    # 置顶小窗口（Win32 API）
+│       └── Renderer.h/.cpp         # 窗口内容渲染（文字布局、颜色）
+│
+├── config/
+│   └── netguard.json           # 用户配置文件（限额、警报阈值）
+│
+└── data/
+    └── daily_usage.json        # 每日流量持久化记录
