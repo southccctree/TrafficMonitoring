@@ -3,12 +3,15 @@
 //  职责：实现网卡数据采集逻辑
 //  依赖：iphlpapi（Windows SDK 自带，CMake 中需链接）
 // ============================================================
-
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600 // Windows Vista 或更高版本
+#endif
 #include "NetworkMonitor.h"
 
 #include <iostream>
 #include <algorithm>
 #include <stdexcept>
+#include <netioapi.h>   // MIB_IF_TABLE2, MIB_IF_ROW2, GetIfTable2, FreeMibTable
 
 // 链接 iphlpapi 库（也可在 CMakeLists.txt 中配置）
 #pragma comment(lib, "iphlpapi.lib")

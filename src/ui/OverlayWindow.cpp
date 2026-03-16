@@ -118,7 +118,7 @@ void OverlayWindow::messageLoop(int x, int y, int w, int h, BYTE opacity) {
     wc.cbSize           = sizeof(wc);
     wc.lpfnWndProc      = OverlayWindow::WndProc;
     wc.hInstance        = hInstance;
-    wc.hCursor          = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hCursor          = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW = 32512
     wc.hbrBackground    = nullptr;          // 背景由 WM_PAINT 自绘
     wc.lpszClassName    = CLASS_NAME;
 

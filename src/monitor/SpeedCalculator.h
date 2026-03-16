@@ -69,9 +69,10 @@ public:
     // 清除历史快照，下次 update() 会重新开始
     void reset();
 
-private:
-    // 格式化速度为带单位字符串（内部工具函数）
+    // 格式化速度为带单位字符串（SpeedResult 的 formatted() 方法也会调用）
     static std::string formatSpeed(double bytesPerSec);
+
+private:
 
     SpeedResult     m_latest;           // 最新速度结果
     InterfaceSnapshot m_prevSnapshot;   // 上一次快照（用于差值）

@@ -34,7 +34,7 @@ bool Notifier::init(HWND hwnd) {
     nid.uCallbackMessage = WM_TRAY_ICON;
 
     // 使用系统默认应用图标（后续可替换为自定义 .ico）
-    nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    nid.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512)); // IDI_APPLICATION
 
     // 托盘悬浮提示文字
     wcscpy_s(nid.szTip, L"NetGuard — 流量监控");

@@ -1,3 +1,15 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600  // Windows Vista 或更高版本
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <netioapi.h>   // MIB_IF_TABLE2, MIB_IF_ROW2, GetIfTable2, FreeMibTable
+#include <iphlpapi.h>   // MIB_IF_TABLE2, MIB_IF_ROW2, GetIfTable2, FreeMibTable
+
 #pragma once
 
 // ============================================================

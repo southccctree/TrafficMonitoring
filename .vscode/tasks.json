@@ -1,0 +1,47 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "NetGuard: 构建 (Debug)",
+            "command": "D:\\msys64\\ucrt64\\bin\\g++.exe",
+            "args": [
+                "-std=c++17",
+                "-fdiagnostics-color=always",
+                "-g",
+                "-finput-charset=UTF-8",
+                "-fexec-charset=UTF-8",
+
+                "${workspaceFolder}\\src\\main.cpp",
+                "${workspaceFolder}\\src\\config\\Config.cpp",
+                "${workspaceFolder}\\src\\monitor\\NetworkMonitor.cpp",
+                "${workspaceFolder}\\src\\monitor\\SpeedCalculator.cpp",
+                "${workspaceFolder}\\src\\stats\\DailyTracker.cpp",
+                "${workspaceFolder}\\src\\stats\\SessionTracker.cpp",
+                "${workspaceFolder}\\src\\alert\\AlertManager.cpp",
+                "${workspaceFolder}\\src\\alert\\Notifier.cpp",
+                "${workspaceFolder}\\src\\ui\\OverlayWindow.cpp",
+                "${workspaceFolder}\\src\\ui\\Renderer.cpp",
+
+                "-I", "${workspaceFolder}\\src",
+                "-I", "${workspaceFolder}\\third_party",
+
+                "-o", "${workspaceFolder}\\build\\NetGuard.exe",
+
+                "-liphlpapi",
+                "-lws2_32",
+                "-lshell32",
+                "-luser32",
+                "-lgdi32"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
