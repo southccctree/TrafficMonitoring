@@ -24,11 +24,13 @@
 #include "ui/Renderer.h"
 
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <thread>
 #include <chrono>
 #include <csignal>
 #include <atomic>
-#include <iomanip>
+
 // ============================================================
 //  全局退出标志（Ctrl+C 或窗口关闭时设置）
 // ============================================================
@@ -83,6 +85,12 @@ int main() {
     std::cout << "[main] 检测到网卡列表:\n";
     for (const auto& iface : interfaces) {
         std::cout << "         - " << iface << "\n";
+    }
+
+    // 启动 Npcap 抓包（公网流量过滤模式）
+    if (!networkMonitor.start(appCfg.monitor.networkInterface)) {
+        std::cerr << "[main] Npcap 启动失败，请确认已安装 Npcap 并以管理员身份运行\n";
+        return 1;
     }
 
     // 加载今日流量数据

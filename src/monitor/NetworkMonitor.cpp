@@ -1,172 +1,388 @@
 // ============================================================
 //  NetworkMonitor.cpp
-//  职责：实现网卡数据采集逻辑
-//  依赖：iphlpapi（Windows SDK 自带，CMake 中需链接）
+//  职责：用 Npcap 逐包捕获，过滤局域网流量，只统计公网字节
+//  依赖：Npcap SDK（third_party/npcap-sdk/）、iphlpapi
 // ============================================================
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600 // Windows Vista 或更高版本
-#endif
+
 #include "NetworkMonitor.h"
 
 #include <iostream>
 #include <algorithm>
-#include <stdexcept>
-#include <netioapi.h>   // MIB_IF_TABLE2, MIB_IF_ROW2, GetIfTable2, FreeMibTable
+#include <cstring>
 
-// 链接 iphlpapi 库（也可在 CMakeLists.txt 中配置）
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "ws2_32.lib")
+// wpcap.lib 和 Packet.lib 在 tasks.json 的 -L 参数中指定
 
 namespace NetGuard {
 
 // ============================================================
-//  snapshot() — 采集所有网卡的当前字节快照
+//  以太网帧头（14 字节）
 // ============================================================
-bool NetworkMonitor::snapshot(std::vector<InterfaceSnapshot>& out) const {
-    out.clear();
+#pragma pack(push, 1)
+struct EtherHeader {
+    uint8_t  dstMac[6];
+    uint8_t  srcMac[6];
+    uint16_t etherType;   // 网络字节序，0x0800 = IPv4
+};
 
-    // GetIfTable2 返回一个动态分配的 MIB_IF_TABLE2 结构
-    // 必须用 FreeMibTable() 释放，这里用 RAII 包装
-    MIB_IF_TABLE2* pTable = nullptr;
-    DWORD result = GetIfTable2(&pTable);
+// IPv4 头（最小 20 字节）
+struct IPv4Header {
+    uint8_t  versionIHL;  // 高4位版本(4)，低4位头长度（×4字节）
+    uint8_t  tos;
+    uint16_t totalLength; // 网络字节序，含头+数据
+    uint16_t id;
+    uint16_t flagsOffset;
+    uint8_t  ttl;
+    uint8_t  protocol;
+    uint16_t checksum;
+    uint32_t srcIP;       // 网络字节序
+    uint32_t dstIP;       // 网络字节序
+};
+#pragma pack(pop)
 
-    if (result != NO_ERROR) {
-        std::cerr << "[NetworkMonitor] GetIfTable2 失败，错误码: " << result << "\n";
+static constexpr uint16_t ETHERTYPE_IPV4 = 0x0800;
+
+// ============================================================
+//  start() — 初始化 Npcap，启动抓包线程
+// ============================================================
+bool NetworkMonitor::start(const std::string& interfaceName) {
+    if (m_running.load()) return true;
+
+    // 确定要监控的网卡
+    std::string devName = (interfaceName == "auto")
+        ? autoSelectInterface()
+        : interfaceName;
+
+    if (devName.empty()) {
+        std::cerr << "[NetworkMonitor] 未找到合适的网卡\n";
         return false;
     }
 
-    // RAII：离开作用域时自动释放
-    struct TableGuard {
-        MIB_IF_TABLE2* ptr;
-        ~TableGuard() { if (ptr) FreeMibTable(ptr); }
-    } guard{ pTable };
+    // 获取本机 IP（用于方向判断）
+    m_localIP = getLocalIP(devName);
 
-    out.reserve(pTable->NumEntries);
+    // 打开网卡（混杂模式关闭，只捕获本机收发的包）
+    char errbuf[PCAP_ERRBUF_SIZE] = {};
+    m_handle = pcap_open_live(
+        devName.c_str(),
+        65535,      // 最大捕获字节数
+        0,          // 不开启混杂模式（只看本机流量）
+        100,        // 读超时 ms
+        errbuf
+    );
 
-    for (ULONG i = 0; i < pTable->NumEntries; ++i) {
-        const MIB_IF_ROW2& row = pTable->Table[i];
-
-        // 跳过回环网卡（lo）和未连接状态的虚拟网卡
-        if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK) continue;
-
-        InterfaceSnapshot snap;
-        snap.name         = row.Description;              // 宽字符描述名
-        snap.nameUtf8     = wideToUtf8(row.Description);
-        snap.bytesSent     = row.OutOctets;               // 累计发送字节
-        snap.bytesReceived = row.InOctets;                // 累计接收字节
-        snap.isUp          = (row.OperStatus == IfOperStatusUp);
-
-        out.push_back(std::move(snap));
+    if (!m_handle) {
+        std::cerr << "[NetworkMonitor] pcap_open_live 失败: " << errbuf << "\n";
+        return false;
     }
 
+    // 只捕获 IPv4 数据包（过滤器），排除 ARP、IPv6 等
+    struct bpf_program fp;
+    if (pcap_compile(m_handle, &fp, "ip", 0, PCAP_NETMASK_UNKNOWN) == 0) {
+        pcap_setfilter(m_handle, &fp);
+        pcap_freecode(&fp);
+    }
+
+    m_interfaceName = devName;
+    m_stopFlag      = false;
+    m_running       = true;
+
+    std::cout << "[NetworkMonitor] 开始监控（公网流量过滤模式）: "
+              << devName << "\n";
+    if (m_localIP != 0) {
+        in_addr addr;
+        addr.s_addr = m_localIP;
+        std::cout << "[NetworkMonitor] 本机 IP: "
+                  << inet_ntoa(addr) << "\n";
+    }
+
+    // 启动后台捕获线程
+    m_thread = std::thread([this]() { captureLoop(); });
     return true;
 }
 
 // ============================================================
-//  snapshotSingle() — 返回指定网卡的单条快照
+//  stop() — 停止抓包，释放资源
 // ============================================================
-bool NetworkMonitor::snapshotSingle(const std::string& interfaceName,
-                                    InterfaceSnapshot& out) const {
-    std::vector<InterfaceSnapshot> all;
-    if (!snapshot(all) || all.empty()) return false;
+void NetworkMonitor::stop() {
+    if (!m_running.load()) return;
 
-    // "auto" 模式：选择累计字节数最大的网卡
-    if (interfaceName == "auto") {
-        const InterfaceSnapshot* best = findBusiest(all);
-        if (!best) return false;
-        out = *best;
-        return true;
+    m_stopFlag = true;
+
+    // 中断 pcap_next_ex 的阻塞
+    if (m_handle) {
+        pcap_breakloop(m_handle);
     }
 
-    // 按名称匹配（大小写不敏感）
-    std::string target = interfaceName;
-    std::transform(target.begin(), target.end(), target.begin(), ::tolower);
-
-    for (const auto& snap : all) {
-        std::string name = snap.nameUtf8;
-        std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-        if (name.find(target) != std::string::npos) {
-            out = snap;
-            return true;
-        }
+    if (m_thread.joinable()) {
+        m_thread.join();
     }
 
-    std::cerr << "[NetworkMonitor] 未找到网卡: " << interfaceName << "\n";
-    return false;
+    if (m_handle) {
+        pcap_close(m_handle);
+        m_handle = nullptr;
+    }
+
+    m_running = false;
+    std::cout << "[NetworkMonitor] 已停止\n";
 }
 
 // ============================================================
-//  listInterfaces() — 返回所有网卡名称列表
+//  snapshotSingle() — 返回当前公网字节计数快照
+//  接口与原版完全相同，SpeedCalculator 无需修改
+// ============================================================
+bool NetworkMonitor::snapshotSingle(const std::string& /*interfaceName*/,
+                                     InterfaceSnapshot& out) const
+{
+    out.nameUtf8     = m_interfaceName;
+    out.bytesSent     = m_bytesSent.load();
+    out.bytesReceived = m_bytesReceived.load();
+    out.isUp          = m_running.load();
+    return m_running.load();
+}
+
+// ============================================================
+//  listInterfaces() — 列出所有 Npcap 可见网卡
 // ============================================================
 std::vector<std::string> NetworkMonitor::listInterfaces() const {
-    std::vector<InterfaceSnapshot> all;
-    std::vector<std::string> names;
+    std::vector<std::string> result;
 
-    if (!snapshot(all)) return names;
+    pcap_if_t* devs = nullptr;
+    char errbuf[PCAP_ERRBUF_SIZE] = {};
 
-    for (const auto& snap : all) {
-        names.push_back(snap.nameUtf8
-            + (snap.isUp ? " [已连接]" : " [未连接]"));
+    if (pcap_findalldevs(&devs, errbuf) != 0) {
+        std::cerr << "[NetworkMonitor] pcap_findalldevs 失败: " << errbuf << "\n";
+        return result;
     }
-    return names;
-}
 
-// ============================================================
-//  wideToUtf8() — 宽字符转 UTF-8
-// ============================================================
-std::string NetworkMonitor::wideToUtf8(const std::wstring& wide) {
-    if (wide.empty()) return {};
+    for (pcap_if_t* d = devs; d != nullptr; d = d->next) {
+        std::string entry = d->name;
+        if (d->description) {
+            entry += "  [" + std::string(d->description) + "]";
+        }
+        result.push_back(entry);
+    }
 
-    // 计算需要的缓冲区大小
-    int size = WideCharToMultiByte(
-        CP_UTF8, 0,
-        wide.c_str(), static_cast<int>(wide.size()),
-        nullptr, 0,
-        nullptr, nullptr);
-
-    if (size <= 0) return {};
-
-    std::string result(size, '\0');
-    WideCharToMultiByte(
-        CP_UTF8, 0,
-        wide.c_str(), static_cast<int>(wide.size()),
-        result.data(), size,
-        nullptr, nullptr);
-
+    pcap_freealldevs(devs);
     return result;
 }
 
 // ============================================================
-//  findBusiest() — 找出累计流量最大的活跃网卡
+//  captureLoop() — 后台线程：持续获取并处理数据包
 // ============================================================
-const InterfaceSnapshot* NetworkMonitor::findBusiest(
-    const std::vector<InterfaceSnapshot>& list)
-{
-    const InterfaceSnapshot* best = nullptr;
-    uint64_t maxBytes = 0;
+void NetworkMonitor::captureLoop() {
+    struct pcap_pkthdr* header = nullptr;
+    const u_char*       data   = nullptr;
 
-    for (const auto& snap : list) {
-        // 优先选择已连接的网卡
-        if (!snap.isUp) continue;
+    while (!m_stopFlag.load()) {
+        int ret = pcap_next_ex(m_handle, &header, &data);
 
-        uint64_t total = snap.bytesSent + snap.bytesReceived;
-        if (total > maxBytes) {
-            maxBytes = total;
-            best = &snap;
+        if (ret == 1) {
+            // 成功捕获到一个包
+            processPacket(data, static_cast<int>(header->caplen));
+        } else if (ret == 0) {
+            // 超时，继续循环
+            continue;
+        } else {
+            // 错误或 pcap_breakloop 被调用
+            break;
         }
     }
 
-    // 若没有已连接的网卡，退而选择任意流量最大的
-    if (!best && !list.empty()) {
-        for (const auto& snap : list) {
-            uint64_t total = snap.bytesSent + snap.bytesReceived;
-            if (total > maxBytes) {
-                maxBytes = total;
-                best = &snap;
+    m_running = false;
+}
+
+// ============================================================
+//  processPacket() — 解析数据包，过滤 LAN 流量后计入统计
+// ============================================================
+void NetworkMonitor::processPacket(const u_char* data, int capLen) {
+    // 最小长度：14（以太网头）+ 20（IP头）= 34 字节
+    if (capLen < 34) return;
+
+    // 解析以太网头
+    const auto* eth = reinterpret_cast<const EtherHeader*>(data);
+
+    // 只处理 IPv4（0x0800）
+    if (ntohs(eth->etherType) != ETHERTYPE_IPV4) return;
+
+    // 解析 IPv4 头
+    const auto* ip = reinterpret_cast<const IPv4Header*>(data + sizeof(EtherHeader));
+
+    uint32_t src = ip->srcIP;   // 网络字节序
+    uint32_t dst = ip->dstIP;
+
+    // ---- 局域网过滤 ----
+    // 如果源和目标都是私有 IP，说明是纯 LAN 流量，直接跳过
+    if (isPrivateIP(src) && isPrivateIP(dst)) return;
+
+    // 数据包字节数（使用 IP 头中的总长度，不用 caplen）
+    uint16_t ipTotalLen = ntohs(ip->totalLength);
+    if (ipTotalLen == 0) return;
+
+    // ---- 上传 / 下载 方向判断 ----
+    // 源 IP 是本机 → 上传（发出）
+    // 目标 IP 是本机 → 下载（接收）
+    if (m_localIP != 0) {
+        if (src == m_localIP) {
+            m_bytesSent.fetch_add(ipTotalLen, std::memory_order_relaxed);
+        } else if (dst == m_localIP) {
+            m_bytesReceived.fetch_add(ipTotalLen, std::memory_order_relaxed);
+        }
+    } else {
+        // 无法判断方向时，非私有 IP 的包均算下载
+        if (!isPrivateIP(src)) {
+            m_bytesReceived.fetch_add(ipTotalLen, std::memory_order_relaxed);
+        }
+        if (!isPrivateIP(dst)) {
+            m_bytesSent.fetch_add(ipTotalLen, std::memory_order_relaxed);
+        }
+    }
+}
+
+// ============================================================
+//  isPrivateIP() — 判断是否为私有/保留地址
+//  参数：网络字节序的 uint32_t IP
+// ============================================================
+bool NetworkMonitor::isPrivateIP(uint32_t ipNetOrder) {
+    uint32_t ip = ntohl(ipNetOrder);  // 转为主机字节序方便比较
+
+    // 127.0.0.0/8 — 回环
+    if ((ip & 0xFF000000) == 0x7F000000) return true;
+
+    // 10.0.0.0/8 — A 类私有
+    if ((ip & 0xFF000000) == 0x0A000000) return true;
+
+    // 172.16.0.0/12 — B 类私有
+    if ((ip & 0xFFF00000) == 0xAC100000) return true;
+
+    // 192.168.0.0/16 — C 类私有
+    if ((ip & 0xFFFF0000) == 0xC0A80000) return true;
+
+    // 169.254.0.0/16 — 链路本地（APIPA）
+    if ((ip & 0xFFFF0000) == 0xA9FE0000) return true;
+
+    // 224.0.0.0/4 — 组播
+    if ((ip & 0xF0000000) == 0xE0000000) return true;
+
+    // 255.255.255.255 — 广播
+    if (ip == 0xFFFFFFFF) return true;
+
+    return false;
+}
+
+// ============================================================
+//  getLocalIP() — 获取本机在该网卡上的 IP 地址
+// ============================================================
+uint32_t NetworkMonitor::getLocalIP(const std::string& pcapDevName) {
+    // Npcap 设备名格式：\Device\NPF_{GUID}
+    // 提取 GUID 部分来匹配 Windows 网络适配器
+    std::string guid;
+    auto pos = pcapDevName.find('{');
+    if (pos != std::string::npos) {
+        auto end = pcapDevName.find('}', pos);
+        if (end != std::string::npos) {
+            guid = pcapDevName.substr(pos, end - pos + 1);
+        }
+    }
+
+    // 用 GetAdaptersAddresses 遍历所有网卡找到匹配的 IP
+    ULONG bufLen = 15000;
+    std::vector<BYTE> buf(bufLen);
+    auto* pAddresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+
+    if (GetAdaptersAddresses(AF_INET,
+            GAA_FLAG_INCLUDE_PREFIX, nullptr,
+            pAddresses, &bufLen) != NO_ERROR) {
+        return 0;
+    }
+
+    for (auto* adapter = pAddresses;
+         adapter != nullptr;
+         adapter = adapter->Next)
+    {
+        // 将适配器名（GUID）转为字符串比较
+        std::string adapterName = adapter->AdapterName;
+        if (!guid.empty() &&
+            adapterName.find(guid) == std::string::npos) continue;
+
+        // 取第一个 IPv4 单播地址
+        for (auto* ua = adapter->FirstUnicastAddress;
+             ua != nullptr; ua = ua->Next)
+        {
+            if (ua->Address.lpSockaddr->sa_family == AF_INET) {
+                auto* sin = reinterpret_cast<sockaddr_in*>(
+                    ua->Address.lpSockaddr);
+                return sin->sin_addr.s_addr;  // 网络字节序
             }
         }
     }
 
-    return best;
+    return 0;
+}
+
+// ============================================================
+//  autoSelectInterface() — 自动选择物理网卡
+//  优先选择描述中含 Wi-Fi / Ethernet / LAN 的真实网卡
+//  排除含 Virtual / VMware / Loopback / WAN Miniport 的虚拟网卡
+// ============================================================
+std::string NetworkMonitor::autoSelectInterface() const {
+    pcap_if_t* devs = nullptr;
+    char errbuf[PCAP_ERRBUF_SIZE] = {};
+
+    if (pcap_findalldevs(&devs, errbuf) != 0) {
+        std::cerr << "[NetworkMonitor] pcap_findalldevs 失败: " << errbuf << "\n";
+        return {};
+    }
+
+    std::string selected;
+
+    // 关键词黑名单（跳过这些虚拟/无用网卡）
+    auto isVirtual = [](const std::string& desc) {
+        std::string d = desc;
+        std::transform(d.begin(), d.end(), d.begin(), ::tolower);
+        return d.find("virtual")    != std::string::npos ||
+               d.find("vmware")     != std::string::npos ||
+               d.find("loopback")   != std::string::npos ||
+               d.find("miniport")   != std::string::npos ||
+               d.find("bluetooth")  != std::string::npos ||
+               d.find("teredo")     != std::string::npos ||
+               d.find("6to4")       != std::string::npos ||
+               d.find("filter")     != std::string::npos ||
+               d.find("scheduler")  != std::string::npos;
+    };
+
+    // 关键词白名单（优先选这些）
+    auto isPreferred = [](const std::string& desc) {
+        std::string d = desc;
+        std::transform(d.begin(), d.end(), d.begin(), ::tolower);
+        return d.find("wi-fi")    != std::string::npos ||
+               d.find("wifi")     != std::string::npos ||
+               d.find("wireless") != std::string::npos ||
+               d.find("ethernet") != std::string::npos ||
+               d.find("realtek")  != std::string::npos ||
+               d.find("intel")    != std::string::npos ||
+               d.find("mediatek") != std::string::npos;
+    };
+
+    for (pcap_if_t* d = devs; d != nullptr; d = d->next) {
+        std::string desc = d->description ? d->description : "";
+        if (isVirtual(desc)) continue;
+
+        if (isPreferred(desc)) {
+            selected = d->name;
+            std::cout << "[NetworkMonitor] 自动选择网卡: " << desc << "\n";
+            break;
+        }
+
+        // 备选：第一个非虚拟网卡
+        if (selected.empty()) {
+            selected = d->name;
+        }
+    }
+
+    pcap_freealldevs(devs);
+    return selected;
 }
 
 } // namespace NetGuard

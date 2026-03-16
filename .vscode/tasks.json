@@ -25,9 +25,16 @@
 
                 "-I", "${workspaceFolder}\\src",
                 "-I", "${workspaceFolder}\\third_party",
+                "-I", "${workspaceFolder}\\third_party\\npcap-sdk\\Include",
+
+                "-L", "${workspaceFolder}\\third_party\\npcap-sdk\\Lib\\x64",
 
                 "-o", "${workspaceFolder}\\build\\NetGuard.exe",
 
+
+
+                "-lwpcap",
+                "-lPacket",
                 "-liphlpapi",
                 "-lws2_32",
                 "-lshell32",

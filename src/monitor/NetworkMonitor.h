@@ -1,85 +1,116 @@
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600  // Windows Vista 或更高版本
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#include <netioapi.h>   // MIB_IF_TABLE2, MIB_IF_ROW2, GetIfTable2, FreeMibTable
-#include <iphlpapi.h>   // MIB_IF_TABLE2, MIB_IF_ROW2, GetIfTable2, FreeMibTable
-
 #pragma once
 
 // ============================================================
 //  NetworkMonitor.h
-//  职责：通过 Windows API 读取系统网卡的原始字节计数
-//        只负责"取数据"，不做任何计算
+//  职责：通过 Npcap 捕获数据包，只统计公网流量
+//        自动过滤局域网（LAN）流量，包括内网串流等
 //
-//  核心 API：GetIfTable2()（iphlpapi）
-//  返回值：每块网卡当前累计收发的原始字节数（自系统启动起累计）
-//  上层模块（SpeedCalculator）对两次快照做差值，得出速度
+//  与原版的区别：
+//    原版：读取网卡累计字节总数（含局域网）
+//    新版：逐包捕获，跳过源和目标都是私有 IP 的数据包
+//
+//  私有地址段（直接跳过）：
+//    10.0.0.0/8
+//    172.16.0.0/12
+//    192.168.0.0/16
+//    127.0.0.0/8    （回环）
+//    169.254.0.0/16 （链路本地）
 // ============================================================
 
-#include <string>
-#include <vector>
-#include <cstdint>
-
-// Windows 网络相关头文件
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <netioapi.h>
 #include <iphlpapi.h>
-// 链接库：在 CMakeLists.txt 中添加 iphlpapi
-// target_link_libraries(NetGuard PRIVATE iphlpapi)
+
+// Npcap SDK 头文件
+// 将 Npcap SDK 解压至 third_party/npcap-sdk/
+#include <pcap.h>
+
+#include <string>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <cstdint>
 
 namespace NetGuard {
 
 // ------------------------------------------------------------
-//  单块网卡的快照数据
+//  网卡快照（与原版保持相同接口，SpeedCalculator 无需修改）
 // ------------------------------------------------------------
 struct InterfaceSnapshot {
-    std::wstring name;          // 网卡名称（宽字符，Windows 原生格式）
-    std::string  nameUtf8;      // 网卡名称（UTF-8，用于日志和配置匹配）
-    uint64_t     bytesSent;     // 累计发送字节数（上传）
-    uint64_t     bytesReceived; // 累计接收字节数（下载）
-    bool         isUp;          // 网卡是否处于连接状态
+    std::string nameUtf8;           // 网卡名称
+    uint64_t    bytesSent     = 0;  // 累计公网上传字节（不含 LAN）
+    uint64_t    bytesReceived = 0;  // 累计公网下载字节（不含 LAN）
+    bool        isUp          = true;
 };
 
-// ------------------------------------------------------------
+// ============================================================
 //  NetworkMonitor 类
-//  - snapshot()     ：采集所有网卡当前字节数，返回快照列表
-//  - snapshotTotal()：仅返回指定网卡（或自动选择）的合并快照
-//  - listInterfaces()：列出所有可用网卡名称（用于配置和调试）
-//  - selectInterface()：根据配置中的网卡名自动匹配或选择流量最大的
-// ------------------------------------------------------------
+//  - start()          ：启动后台抓包线程
+//  - stop()           ：停止抓包
+//  - snapshotSingle() ：返回当前公网字节计数快照
+//  - listInterfaces() ：列出所有可用网卡（供配置选择）
+//  - isRunning()      ：是否已启动
+// ============================================================
 class NetworkMonitor {
 public:
     NetworkMonitor()  = default;
-    ~NetworkMonitor() = default;
+    ~NetworkMonitor() { stop(); }
 
-    // 采集所有网卡的字节快照
-    // 返回 false 表示 API 调用失败
-    bool snapshot(std::vector<InterfaceSnapshot>& out) const;
+    // 启动抓包线程
+    // interfaceName："auto" 自动选择，或传入具体网卡名
+    // 返回 false 表示 Npcap 未安装或网卡不存在
+    bool start(const std::string& interfaceName = "auto");
 
-    // 返回指定网卡的单条快照
-    // interfaceName 为 "auto" 时自动选择当前字节数最大的网卡
-    // 返回 false 表示未找到目标网卡或 API 失败
+    // 停止抓包线程，释放 Npcap 句柄
+    void stop();
+
+    // 获取当前公网字节计数快照（兼容原版接口）
     bool snapshotSingle(const std::string& interfaceName,
                         InterfaceSnapshot& out) const;
 
-    // 列出所有网卡的 UTF-8 名称，用于调试或配置时选择
+    // 列出所有 Npcap 可见的网卡名称
     std::vector<std::string> listInterfaces() const;
 
-private:
-    // 将宽字符网卡名转换为 UTF-8
-    static std::string wideToUtf8(const std::wstring& wide);
+    // 是否已成功启动抓包
+    bool isRunning() const { return m_running.load(); }
 
-    // 从所有快照中找出累计字节数最大的网卡（最可能是活跃网卡）
-    static const InterfaceSnapshot* findBusiest(
-        const std::vector<InterfaceSnapshot>& list);
+private:
+    // 后台抓包线程：持续调用 pcap_next_ex 获取数据包
+    void captureLoop();
+
+    // 处理单个数据包：解析以太网帧 + IP 头，过滤 LAN 流量
+    void processPacket(const u_char* data, int capLen);
+
+    // 判断 IP（网络字节序 uint32_t）是否属于私有地址段
+    static bool isPrivateIP(uint32_t ipNetOrder);
+
+    // 从系统获取指定网卡的本机 IP（用于判断上传/下载方向）
+    static uint32_t getLocalIP(const std::string& pcapDevName);
+
+    // 自动选择最合适的物理网卡（排除虚拟/回环网卡）
+    std::string autoSelectInterface() const;
+
+    // ---- 统计计数器（原子，线程安全）----
+    std::atomic<uint64_t> m_bytesSent    { 0 };  // 公网上传
+    std::atomic<uint64_t> m_bytesReceived{ 0 };  // 公网下载
+
+    std::string m_interfaceName;    // 实际使用的网卡 pcap 设备名
+    std::string m_interfaceDesc;    // 网卡描述（用于日志）
+    uint32_t    m_localIP = 0;      // 本机 IP（网络字节序）
+
+    std::thread       m_thread;
+    std::atomic<bool> m_running  { false };
+    std::atomic<bool> m_stopFlag { false };
+
+    pcap_t* m_handle = nullptr;     // Npcap 捕获句柄
 };
 
 } // namespace NetGuard
