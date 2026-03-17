@@ -25,6 +25,7 @@
 
 #include <string>
 #include <vector>
+#include <array>
 #include <thread>
 #include <atomic>
 #include <cstdint>
@@ -73,6 +74,8 @@ private:
     static bool     isPrivateIPv4(uint32_t ipNetOrder);
     static bool     isPrivateIPv6(const uint8_t ip[16]);
     static uint32_t getLocalIPv4(const std::string& pcapDevName);
+    static std::vector<std::array<uint8_t, 16>>
+        getLocalIPv6List(const std::string& pcapDevName);
     std::string     autoSelectInterface() const;
 
     std::atomic<uint64_t> m_bytesSent    { 0 };
@@ -80,6 +83,7 @@ private:
 
     std::string  m_interfaceName;
     uint32_t     m_localIPv4 = 0;
+    std::vector<std::array<uint8_t, 16>> m_localIPv6Addrs;
     bool         m_filterLan = true;
 
     std::thread       m_thread;

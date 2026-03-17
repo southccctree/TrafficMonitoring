@@ -152,14 +152,14 @@ void Renderer::draw(HDC hdc, RECT clientRect) {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(1);
         oss << "VPN  "
-            << m_daily.totalMB()    // VPN 用量与今日用量相同
+            << m_alert.vpnUsedMB
             << " / "
             << static_cast<int>(m_alert.vpnLimitMB)
             << " MB";
 
         // VPN 剩余不足 20% 时变色
         double vpnPercent = (m_alert.vpnLimitMB > 0)
-            ? (m_daily.totalMB() / m_alert.vpnLimitMB * 100.0)
+            ? (m_alert.vpnUsedMB / m_alert.vpnLimitMB * 100.0)
             : 0.0;
         COLORREF col = RGB(220, 220, 220);
         if      (vpnPercent >= 100.0) col = RGB(255, 80,  80);

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <array>
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -72,6 +73,7 @@ bool NetworkMonitor::start(const std::string& interfaceName, bool filterLan) {
     }
 
     m_localIPv4 = getLocalIPv4(devName);
+    m_localIPv6Addrs = getLocalIPv6List(devName);
 
     // ---- 使用 pcap_create + immediate mode 替代 pcap_open_live ----
     char errbuf[PCAP_ERRBUF_SIZE] = {};
@@ -105,6 +107,9 @@ bool NetworkMonitor::start(const std::string& interfaceName, bool filterLan) {
                      0, PCAP_NETMASK_UNKNOWN) == 0) {
         pcap_setfilter(m_handle, &fp);
         pcap_freecode(&fp);
+    } else {
+        std::cerr << "[NetworkMonitor] 警告：BPF 过滤器设置失败: "
+                  << pcap_geterr(m_handle) << "\n";
     }
 
     m_interfaceName = devName;
@@ -120,6 +125,10 @@ bool NetworkMonitor::start(const std::string& interfaceName, bool filterLan) {
         addr.s_addr = m_localIPv4;
         std::cout << "[NetworkMonitor] 本机 IPv4: "
                   << inet_ntoa(addr) << "\n";
+    }
+    if (!m_localIPv6Addrs.empty()) {
+        std::cout << "[NetworkMonitor] 本机 IPv6 地址数量: "
+                  << m_localIPv6Addrs.size() << "\n";
     }
 
     m_thread = std::thread([this]() { captureLoop(); });
@@ -233,9 +242,26 @@ void NetworkMonitor::processPacket(const u_char* data, int capLen) {
         uint32_t totalLen = IPV6_HLEN + payLen;
         if (totalLen == 0) return;
 
-        // IPv6 方向判断：简化为：非私有源→上传，非私有目标→下载
-        if (!srcPrivate) m_bytesSent.fetch_add(totalLen,     std::memory_order_relaxed);
-        if (!dstPrivate) m_bytesReceived.fetch_add(totalLen, std::memory_order_relaxed);
+        auto isLocalIPv6 = [this](const uint8_t ip[16]) {
+            for (const auto& local : m_localIPv6Addrs) {
+                if (memcmp(local.data(), ip, 16) == 0) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        bool srcLocal = isLocalIPv6(ip6->srcIP);
+        bool dstLocal = isLocalIPv6(ip6->dstIP);
+
+        if (srcLocal && !dstLocal) {
+            m_bytesSent.fetch_add(totalLen, std::memory_order_relaxed);
+        } else if (dstLocal && !srcLocal) {
+            m_bytesReceived.fetch_add(totalLen, std::memory_order_relaxed);
+        } else if (!srcLocal && !dstLocal) {
+            // 无法判定方向时，只记一侧，避免同包双计数。
+            m_bytesReceived.fetch_add(totalLen, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -303,6 +329,48 @@ uint32_t NetworkMonitor::getLocalIPv4(const std::string& pcapDevName) {
         }
     }
     return 0;
+}
+
+// ============================================================
+//  getLocalIPv6List()
+// ============================================================
+std::vector<std::array<uint8_t, 16>>
+NetworkMonitor::getLocalIPv6List(const std::string& pcapDevName) {
+    std::vector<std::array<uint8_t, 16>> addrs;
+
+    std::string guid;
+    auto pos = pcapDevName.find('{');
+    if (pos != std::string::npos) {
+        auto end = pcapDevName.find('}', pos);
+        if (end != std::string::npos)
+            guid = pcapDevName.substr(pos, end - pos + 1);
+    }
+
+    ULONG bufLen = 15000;
+    std::vector<BYTE> buf(bufLen);
+    auto* pAddr = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+
+    if (GetAdaptersAddresses(AF_INET6, GAA_FLAG_INCLUDE_PREFIX,
+                             nullptr, pAddr, &bufLen) != NO_ERROR)
+        return addrs;
+
+    for (auto* a = pAddr; a != nullptr; a = a->Next) {
+        if (!guid.empty() &&
+            std::string(a->AdapterName).find(guid) == std::string::npos)
+            continue;
+
+        for (auto* ua = a->FirstUnicastAddress; ua; ua = ua->Next) {
+            if (ua->Address.lpSockaddr->sa_family == AF_INET6) {
+                auto* sin6 = reinterpret_cast<sockaddr_in6*>(
+                    ua->Address.lpSockaddr);
+                std::array<uint8_t, 16> ip{};
+                memcpy(ip.data(), sin6->sin6_addr.s6_addr, 16);
+                addrs.push_back(ip);
+            }
+        }
+    }
+
+    return addrs;
 }
 
 // ============================================================

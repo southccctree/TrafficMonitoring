@@ -65,6 +65,8 @@ void Notifier::notify(const AlertStatus& status) {
         : static_cast<double>(m_cooldownSec); // 首次视为冷却完毕
 
     bool cooldownOk = (sinceLastNotify >= static_cast<double>(m_cooldownSec));
+    bool isLevelEscalation =
+        (static_cast<int>(status.level) > static_cast<int>(m_lastNotifiedLevel));
 
     // ---- 窗口变色（不受冷却限制，实时响应）----
     if (m_colorCallback) {
@@ -78,7 +80,7 @@ void Notifier::notify(const AlertStatus& status) {
     }
 
     // ---- 流量等级通知（等级变化 + 冷却完毕 才弹窗）----
-    if (status.levelChanged && cooldownOk) {
+    if (status.levelChanged && (cooldownOk || isLevelEscalation)) {
         std::string title, message;
         DWORD icon = NIIF_INFO;
 

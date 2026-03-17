@@ -143,7 +143,7 @@ int main() {
     constexpr int SAVE_INTERVAL_SEC = 10;
     int consoleTick = 0;
 
-    while (g_running.load() && overlayWindow.isRunning()) {
+    while (g_running.load() && (!windowOk || overlayWindow.isRunning())) {
 
         // -- 6.1 主网卡快照 → 速度 → 累计 --
         NetGuard::InterfaceSnapshot snap;
@@ -172,8 +172,8 @@ int main() {
             }
             vpnUsedMB = vpnDailyTracker.record().totalMB();
         } else {
-            // VPN 网卡未配置：回退到主网卡数据
-            vpnUsedMB = dailyTracker.record().totalMB();
+            // VPN 网卡未配置或启动失败：视为未启用
+            vpnUsedMB = 0.0;
         }
 
         // -- 6.3 评估警报 --
