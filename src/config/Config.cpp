@@ -5,13 +5,52 @@
 
 #include "Config.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shlwapi.h>
+
 #include <fstream>
 #include <iostream>
 #include <filesystem>
 #include "../../third_party/nlohmann/json.hpp"
 
+#pragma comment(lib, "Shlwapi.lib")
+
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+namespace {
+
+std::string GetConfigPath() {
+    wchar_t exePath[MAX_PATH] = {};
+    const DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return "config/netguard.json";
+    }
+
+    PathRemoveFileSpecW(exePath);
+
+    std::wstring wPath = exePath;
+    wPath += L"\\config\\netguard.json";
+
+    const int size = WideCharToMultiByte(CP_UTF8, 0, wPath.c_str(), -1,
+                                         nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+        return "config/netguard.json";
+    }
+
+    std::string path(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wPath.c_str(), -1,
+                        &path[0], size, nullptr, nullptr);
+    if (!path.empty() && path.back() == '\0') {
+        path.pop_back();
+    }
+    return path;
+}
+
+} // namespace
 
 namespace NetGuard {
 
@@ -21,15 +60,16 @@ Config& Config::instance() {
 }
 
 bool Config::load(const std::string& filePath) {
-    m_filePath = filePath;
+    (void)filePath;
+    m_filePath = GetConfigPath();
 
-    fs::path dir = fs::path(filePath).parent_path();
+    fs::path dir = fs::path(m_filePath).parent_path();
     if (!dir.empty() && !fs::exists(dir))
         fs::create_directories(dir);
 
-    std::ifstream file(filePath);
+    std::ifstream file(m_filePath);
     if (!file.is_open()) {
-        std::cout << "[Config] 配置文件未找到，使用默认值并创建: " << filePath << "\n";
+        std::cout << "[Config] 配置文件未找到，使用默认值并创建: " << m_filePath << "\n";
         save();
         return false;
     }
@@ -61,6 +101,14 @@ bool Config::load(const std::string& filePath) {
             m_config.monitor.networkInterface = j["network_interface"].get<std::string>();
         if (j.contains("vpn_interface"))
             m_config.monitor.vpnInterface = j["vpn_interface"].get<std::string>();
+        if (j.contains("clash_config_path"))
+            m_config.monitor.clashConfigPath = j["clash_config_path"].get<std::string>();
+        if (j.contains("clash_api_host"))
+            m_config.monitor.clashApiHost = j["clash_api_host"].get<std::string>();
+        if (j.contains("clash_api_port"))
+            m_config.monitor.clashApiPort = j["clash_api_port"].get<uint16_t>();
+        if (j.contains("clash_api_secret"))
+            m_config.monitor.clashApiSecret = j["clash_api_secret"].get<std::string>();
 
         // ---- 窗口配置 ----
         if (j.contains("window")) {
@@ -72,7 +120,7 @@ bool Config::load(const std::string& filePath) {
             if (w.contains("height"))     m_config.window.height    = w["height"].get<int>();
         }
 
-        std::cout << "[Config] 配置加载成功: " << filePath << "\n";
+        std::cout << "[Config] 配置加载成功: " << m_filePath << "\n";
         return true;
 
     } catch (const json::exception& e) {
@@ -100,6 +148,10 @@ bool Config::save() const {
         j["refresh_interval_ms"]         = m_config.monitor.refreshIntervalMs;
         j["network_interface"]           = m_config.monitor.networkInterface;
         j["vpn_interface"]               = m_config.monitor.vpnInterface;
+        j["clash_config_path"]           = m_config.monitor.clashConfigPath;
+        j["clash_api_host"]              = m_config.monitor.clashApiHost;
+        j["clash_api_port"]              = m_config.monitor.clashApiPort;
+        j["clash_api_secret"]            = m_config.monitor.clashApiSecret;
         j["window"]["position_x"]        = m_config.window.positionX;
         j["window"]["position_y"]        = m_config.window.positionY;
         j["window"]["opacity"]           = m_config.window.opacity;

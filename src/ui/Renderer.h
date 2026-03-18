@@ -53,7 +53,9 @@ public:
     void update(const SpeedResult&   speed,
                 const DailyRecord&   daily,
                 const SessionRecord& session,
-                const AlertStatus&   alert);
+                const AlertStatus&   alert,
+                const DailyRecord&   clashDaily,
+                bool                 clashOnline);
 
     // 绘制回调：由 OverlayWindow 在 WM_PAINT 时调用
     void draw(HDC hdc, RECT clientRect);
@@ -80,8 +82,10 @@ private:
     // 数据快照（由 update() 写入，draw() 读取）
     SpeedResult   m_speed;
     DailyRecord   m_daily;
+    DailyRecord   m_clashDaily;
     SessionRecord m_session;
     AlertStatus   m_alert;
+    bool          m_clashOnline = false;
 
     // 行高和左边距常量
     static constexpr int LINE_HEIGHT  = 22;

@@ -3,7 +3,7 @@
     "tasks": [
         {
             "type": "shell",
-            "label": "NetGuard: 构建 (Debug)",
+            "label": "NetGuard: 编译 (Debug)",
             "command": "D:\\msys64\\ucrt64\\bin\\g++.exe",
             "args": [
                 "-std=c++17",
@@ -15,6 +15,7 @@
                 "${workspaceFolder}\\src\\main.cpp",
                 "${workspaceFolder}\\src\\config\\Config.cpp",
                 "${workspaceFolder}\\src\\monitor\\NetworkMonitor.cpp",
+                "${workspaceFolder}\\src\\monitor\\ClashApiProbe.cpp",
                 "${workspaceFolder}\\src\\monitor\\SpeedCalculator.cpp",
                 "${workspaceFolder}\\src\\stats\\DailyTracker.cpp",
                 "${workspaceFolder}\\src\\stats\\SessionTracker.cpp",
@@ -31,23 +32,70 @@
 
                 "-o", "${workspaceFolder}\\build\\NetGuard.exe",
 
-
-
                 "-lwpcap",
                 "-lPacket",
+                "-lwinhttp",
                 "-liphlpapi",
                 "-lws2_32",
                 "-lshell32",
                 "-luser32",
-                "-lgdi32"
+                "-lgdi32",
+                "-lshlwapi"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "type": "shell",
+            "label": "NetGuard: 同步配置",
+            "command": "cmd",
+            "args": [
+                "/C",
+                "if not exist ${workspaceFolder}\\build\\config mkdir ${workspaceFolder}\\build\\config && copy /Y ${workspaceFolder}\\config\\netguard.json ${workspaceFolder}\\build\\config\\netguard.json"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "NetGuard: 构建 (Debug)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "NetGuard: 编译 (Debug)",
+                "NetGuard: 同步配置"
+            ],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
+            "problemMatcher": []
+        },
+        {
+            "type": "shell",
+            "label": "NetGuardConfig: 构建",
+            "command": "D:\\msys64\\ucrt64\\bin\\g++.exe",
+            "args": [
+                "-std=c++17",
+                "-fdiagnostics-color=always",
+                "-g",
+                "-finput-charset=UTF-8",
+                "-fexec-charset=UTF-8",
+                "${workspaceFolder}\\tools\\NetGuardConfig.cpp",
+                "-I", "${workspaceFolder}\\third_party",
+                "-o", "${workspaceFolder}\\build\\NetGuardConfig.exe",
+                "-lcomctl32",
+                "-lcomdlg32",
+                "-luser32",
+                "-lgdi32",
+                "-mwindows"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
             "problemMatcher": ["$gcc"]
         }
     ]

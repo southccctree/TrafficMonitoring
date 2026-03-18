@@ -22,6 +22,8 @@ set(SOURCES
 
     src/monitor/NetworkMonitor.cpp
     src/monitor/NetworkMonitor.h
+    src/monitor/ClashApiProbe.cpp
+    src/monitor/ClashApiProbe.h
     src/monitor/SpeedCalculator.cpp
     src/monitor/SpeedCalculator.h
 
@@ -58,6 +60,7 @@ target_include_directories(NetGuard PRIVATE
 #  链接 Windows 系统库
 # ============================================================
 target_link_libraries(NetGuard PRIVATE
+    winhttp     # Clash API /traffic SSE 长连接
     iphlpapi    # GetIfTable2（网卡流量读取）
     ws2_32      # Winsock（部分网络 API 依赖）
     shell32     # Shell_NotifyIcon（托盘通知）

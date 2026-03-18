@@ -7,6 +7,7 @@
 // ============================================================
 
 #include <string>
+#include <cstdint>
 
 namespace NetGuard {
 
@@ -32,6 +33,10 @@ struct MonitorConfig {
     int         refreshIntervalMs = 1000;
     std::string networkInterface  = "auto"; // 主网卡（公网流量）
     std::string vpnInterface      = "";     // VPN 网卡，空字符串表示不单独统计
+    std::string clashConfigPath   = "";          // Clash config.yaml 路径
+    std::string clashApiHost      = "127.0.0.1"; // Clash API 主机
+    uint16_t    clashApiPort      = 60082;         // Clash API 端口
+    std::string clashApiSecret    = "";          // Clash API Bearer 密钥
 };
 
 struct AppConfig {

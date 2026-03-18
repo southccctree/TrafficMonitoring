@@ -7,6 +7,7 @@
 // ============================================================
 
 #include "config/Config.h"
+#include "monitor/ClashApiProbe.h"
 #include "monitor/NetworkMonitor.h"
 #include "monitor/SpeedCalculator.h"
 #include "stats/DailyTracker.h"
@@ -48,19 +49,19 @@ int main() {
     std::cout << "[main] VPN 限额: "    << appCfg.alert.vpnLimitMB          << " MB\n";
     std::cout << "[main] 弹窗冷却: "    << appCfg.alert.notifyCooldownSec   << " 秒\n";
     std::cout << "[main] 主网卡: "      << appCfg.monitor.networkInterface   << "\n";
-    std::cout << "[main] VPN 网卡: "    << (appCfg.monitor.vpnInterface.empty()
-                                            ? "（未配置，VPN 用量将复用主网卡数据）"
-                                            : appCfg.monitor.vpnInterface)   << "\n";
+    std::cout << "[main] Clash API: "  << appCfg.monitor.clashApiHost
+              << ":" << appCfg.monitor.clashApiPort << "\n";
+    if (!appCfg.monitor.clashConfigPath.empty())
+        std::cout << "[main] Clash 配置路径: " << appCfg.monitor.clashConfigPath << "\n";
 
     // --------------------------------------------------------
     //  2. 初始化模块
     // --------------------------------------------------------
+    NetGuard::ClashApiProbe  clashApiProbe;      // Clash API（SSE /traffic）
     NetGuard::NetworkMonitor  networkMonitor;     // 主网卡（公网过滤）
-    NetGuard::NetworkMonitor  vpnMonitor;         // VPN 网卡（全量统计）
     NetGuard::SpeedCalculator speedCalc;
-    NetGuard::SpeedCalculator vpnSpeedCalc;
     NetGuard::DailyTracker    dailyTracker;
-    NetGuard::DailyTracker    vpnDailyTracker;    // VPN 独立每日统计
+    NetGuard::DailyTracker    clashDailyTracker;  // Clash 独立每日统计
     NetGuard::SessionTracker  sessionTracker;
     NetGuard::AlertManager    alertManager;
     NetGuard::Notifier        notifier;
@@ -79,19 +80,23 @@ int main() {
         return 1;
     }
 
-    // ---- 启动 VPN 网卡监控（不过滤 LAN，统计全量）----
-    bool vpnMonitorOk = false;
-    if (!appCfg.monitor.vpnInterface.empty()) {
-        vpnMonitorOk = vpnMonitor.start(appCfg.monitor.vpnInterface, false);
-        if (!vpnMonitorOk) {
-            std::cerr << "[main] VPN 网卡启动失败，VPN 用量将复用主网卡数据\n";
-        }
+    // ---- 启动 Clash API 监控 ----
+    std::cout << "[Config] 尝试加载 Clash 配置: "
+              << (appCfg.monitor.clashConfigPath.empty() ? "手动模式" : appCfg.monitor.clashConfigPath)
+              << " 端口: " << appCfg.monitor.clashApiPort << "\n";
+
+    if (!appCfg.monitor.clashConfigPath.empty()) {
+        clashApiProbe.start(appCfg.monitor.clashConfigPath);
+    } else {
+        clashApiProbe.start(appCfg.monitor.clashApiHost,
+                            appCfg.monitor.clashApiPort,
+                            appCfg.monitor.clashApiSecret);
     }
+    bool wasClashOnline = clashApiProbe.isOnline();
 
     // ---- 加载每日数据 ----
     dailyTracker.load("data/daily_usage.json");
-    if (vpnMonitorOk)
-        vpnDailyTracker.load("data/vpn_usage.json");
+    clashDailyTracker.load("data/clash_usage.json");
 
     sessionTracker.start();
 
@@ -158,23 +163,31 @@ int main() {
             }
         }
 
-        // -- 6.2 VPN 网卡快照 → VPN 每日累计 --
-        double vpnUsedMB = 0.0;
-        if (vpnMonitorOk) {
-            NetGuard::InterfaceSnapshot vpnSnap;
-            if (vpnMonitor.snapshotSingle(appCfg.monitor.vpnInterface, vpnSnap)) {
-                vpnSpeedCalc.update(vpnSnap);
-                if (vpnSpeedCalc.isReady()) {
-                    vpnDailyTracker.addBytes(vpnSpeedCalc.deltaUpload(),
-                                             vpnSpeedCalc.deltaDownload());
-                    vpnDailyTracker.checkRollover();
-                }
-            }
-            vpnUsedMB = vpnDailyTracker.record().totalMB();
-        } else {
-            // VPN 网卡未配置或启动失败：视为未启用
-            vpnUsedMB = 0.0;
+        // -- 6.2 Clash API 采集 --
+        static int clashReconnectTick = 0;
+        if (++clashReconnectTick >= 30) {
+            clashReconnectTick = 0;
+            clashApiProbe.tryReconnect();
         }
+
+        if (clashApiProbe.isOnline()) {
+            const uint64_t upBytes = clashApiProbe.lastUpBytes();
+            const uint64_t downBytes = clashApiProbe.lastDownBytes();
+            if (upBytes > 0 || downBytes > 0) {
+                clashDailyTracker.addBytes(upBytes, downBytes);
+            }
+            clashDailyTracker.checkRollover();
+        }
+
+        const bool clashOnline = clashApiProbe.isOnline();
+        if (clashOnline != wasClashOnline) {
+            std::cout << "\n[main] Clash API 状态: "
+                      << (clashOnline ? "在线" : "离线") << "\n";
+            wasClashOnline = clashOnline;
+        }
+
+        const auto& clashDaily = clashDailyTracker.record();
+        const double clashUsedMB = clashDaily.totalMB();
 
         // -- 6.3 评估警报 --
         const auto& daily   = dailyTracker.record();
@@ -182,15 +195,14 @@ int main() {
         const auto& speed   = speedCalc.latest();
 
         NetGuard::AlertStatus alertStatus = alertManager.evaluate(
-            daily.totalMB(), vpnUsedMB,
+            daily.totalMB(), clashUsedMB,
             speed.uploadKBps(), speed.downloadKBps());
 
         // -- 6.4 通知 --
         notifier.notify(alertStatus);
 
         // -- 6.5 渲染 --
-        // 将 vpnUsedMB 注入 alertStatus 供 Renderer 使用
-        renderer.update(speed, daily, session, alertStatus);
+        renderer.update(speed, daily, session, alertStatus, clashDaily, clashOnline);
         if (windowOk) overlayWindow.requestRedraw();
 
         // -- 6.6 控制台输出（每 5 秒一次）--
@@ -201,9 +213,9 @@ int main() {
                       << "  ▼ " << speed.downloadFormatted()
                       << "  今日: " << std::fixed << std::setprecision(1)
                       << daily.totalMB() << " MB";
-            if (vpnMonitorOk)
-                std::cout << "  VPN: " << std::fixed << std::setprecision(1)
-                          << vpnUsedMB << " MB";
+            std::cout << "  Clash: " << std::fixed << std::setprecision(1)
+                      << clashUsedMB << " MB"
+                      << " (" << (clashOnline ? "online" : "offline") << ")";
             std::cout << "  " << alertStatus.levelDescription()
                       << "          " << std::flush;
         }
@@ -213,7 +225,7 @@ int main() {
         if (std::chrono::duration<double>(now - lastSaveTime).count()
                 >= SAVE_INTERVAL_SEC) {
             dailyTracker.save();
-            if (vpnMonitorOk) vpnDailyTracker.save();
+            clashDailyTracker.save();
             lastSaveTime = now;
         }
 
@@ -226,7 +238,8 @@ int main() {
     // --------------------------------------------------------
     std::cout << "\n[main] 正在退出，保存数据...\n";
     dailyTracker.save();
-    if (vpnMonitorOk) vpnDailyTracker.save();
+    clashDailyTracker.save();
+    clashApiProbe.stop();
     notifier.shutdown();
     overlayWindow.destroy();
     renderer.shutdown();

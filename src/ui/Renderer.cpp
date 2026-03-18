@@ -82,12 +82,16 @@ void Renderer::shutdown() {
 void Renderer::update(const SpeedResult&   speed,
                       const DailyRecord&   daily,
                       const SessionRecord& session,
-                      const AlertStatus&   alert)
+                      const AlertStatus&   alert,
+                      const DailyRecord&   clashDaily,
+                      bool                 clashOnline)
 {
-    m_speed   = speed;
-    m_daily   = daily;
-    m_session = session;
-    m_alert   = alert;
+    m_speed      = speed;
+    m_daily      = daily;
+    m_clashDaily = clashDaily;
+    m_session    = session;
+    m_alert      = alert;
+    m_clashOnline = clashOnline;
 }
 
 // ============================================================
@@ -146,28 +150,42 @@ void Renderer::draw(HDC hdc, RECT clientRect) {
         y += LINE_HEIGHT;
     }
 
-    // ---- VPN 用量 ----
+    // ---- Clash 用量 ----
     {
         SelectObject(hdc, m_fontNormal);
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(1);
-        oss << "VPN  "
-            << m_alert.vpnUsedMB
-            << " / "
-            << static_cast<int>(m_alert.vpnLimitMB)
-            << " MB";
+        if (!m_clashOnline) {
+            drawText(hdc, "Cla  Offline", x, y, RGB(100, 100, 100));
+            y += LINE_HEIGHT;
+        } else {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(1);
+            oss << "Cla  "
+                << m_clashDaily.totalMB()
+                << " / "
+                << static_cast<int>(m_alert.vpnLimitMB)
+                << " MB";
 
-        // VPN 剩余不足 20% 时变色
-        double vpnPercent = (m_alert.vpnLimitMB > 0)
-            ? (m_alert.vpnUsedMB / m_alert.vpnLimitMB * 100.0)
-            : 0.0;
-        COLORREF col = RGB(220, 220, 220);
-        if      (vpnPercent >= 100.0) col = RGB(255, 80,  80);
-        else if (vpnPercent >= 95.0)  col = RGB(255, 140, 40);
-        else if (vpnPercent >= 80.0)  col = RGB(255, 200, 60);
+            double clashPercent = (m_alert.vpnLimitMB > 0)
+                ? (m_clashDaily.totalMB() / m_alert.vpnLimitMB * 100.0)
+                : 0.0;
+            COLORREF col = RGB(220, 220, 220);
+            if      (clashPercent >= 100.0) col = RGB(255, 80,  80);
+            else if (clashPercent >= 95.0)  col = RGB(255, 140, 40);
+            else if (clashPercent >= 80.0)  col = RGB(255, 200, 60);
 
-        drawText(hdc, oss.str(), x, y, col);
-        y += LINE_HEIGHT;
+            drawText(hdc, oss.str(), x, y, col);
+            y += LINE_HEIGHT;
+
+            if (m_clashDaily.totalMB() > 0.01) {
+                SelectObject(hdc, m_fontSmall);
+                std::ostringstream oss2;
+                oss2 << std::fixed << std::setprecision(1);
+                oss2 << "  ▲" << m_clashDaily.uploadMB()
+                     << " ▼" << m_clashDaily.downloadMB() << " MB";
+                drawText(hdc, oss2.str(), x, y, RGB(140, 140, 140));
+                y += LINE_HEIGHT - 4;
+            }
+        }
     }
 
     // ---- 会话用量 + 时长 ----
