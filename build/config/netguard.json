@@ -1,0 +1,21 @@
+{
+    "alert_threshold_percent": 80,
+    "clash_api_port": 60082,
+    "clash_api_secret": "",
+    "clash_config_path": "",
+    "daily_limit_mb": 4096,
+    "network_interface": "auto",
+    "notify_cooldown_sec": 600,
+    "refresh_interval_ms": 1000,
+    "speed_alert_download_kbps": 2048.0,
+    "speed_alert_upload_kbps": 1024.0,
+    "vpn_limit_mb": 4096,
+    "warn_threshold_percent": 95,
+    "window": {
+        "height": 160,
+        "opacity": 200,
+        "position_x": 20,
+        "position_y": 20,
+        "width": 260
+    }
+}
